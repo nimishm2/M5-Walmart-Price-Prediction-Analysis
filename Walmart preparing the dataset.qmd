@@ -1,0 +1,516 @@
+---
+title: "Walmart - Preparing the Dataset"
+format: html
+editor: visual
+---
+
+## Packages
+
+For this first document, the following packages will be used:
+
+```{r}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(magrittr)
+library(gridExtra)
+
+```
+
+The `tidyverse` is a collection of R packages to read, visualize and manipulate data. `magrittr` is loaded for the `%<>%` operator.
+
+## Calendar
+
+Two sets of explanatory variables are available: calendar variables and sales prices. We begin by loading the 'calendar.csv' made available by the competition's organization:
+
+```{r}
+#| warning: false
+#| message: false
+d1<-"/Users/nimishmathur/Downloads/calendar.csv"
+calendar<-read_csv(d1)
+head(calendar)
+
+```
+
+The *ReadMe* file describes the 'calendar.csv' as:
+
+-   "Contains information about the date the sales refer to, the existence of special days and SNAP activities".
+
+The timespan made available is quite large:
+
+```{r}
+#| warning: false
+#| message: false
+
+range(calendar$date)
+
+```
+
+The last 28 observations were used as the out-of-sample period, in which the competitor's forecasts were compared. The preceding 28 observations served as a validation period that was released during the competition - see [Makridakis, Spiliotis, Assimakopoulos (2022)](https://www.sciencedirect.com/science/article/pii/S0169207021001187?via%3Dihub) for a detailed discussion.
+
+The `wm_yr_wk` variable is a code representing the week of the competition. The value `11101` , for example, represents the first week of data available, from 2011-01-29 to 2011-02-04. We'll use this information to merge our calendar variables to the selling prices - which we present in the next subsection.
+
+`weekday`, `wday`, `month` and `year` are straightforward and could be obtained from the `date` variable.
+
+`event_name_1`/`event_name_2` represent calendar events that might change the behavior of consumers' in a given season period. `event_type_1`/`event_type_2` groups different events according to its types, namely "Sporting", "Cultural", "National", and "Religious". Lets check the first non-empty event as an example:
+
+```{r}
+#| warning: false
+#| message: false
+
+calendar %>% filter(!is.na(event_name_1)) %>%
+  head(1) %>%
+  select(date, weekday, event_name_1, event_type_1, event_name_2, event_type_2)
+
+```
+
+In 2011-02-06 only one special event occurred: the Super Bowl.
+
+Finally, a footnote (#9) in [Makridakis, Spiliotis, Assimakopoulos (2022)](https://www.sciencedirect.com/science/article/pii/S0169207021001187?via%3Dihub) describes SNAP dummies as:
+
+-   "The United States federal government provides a nutrition assistance benefit called the Supplement Nutrition Assistance Program (SNAP). SNAP provides low-income families and individuals with an Electronic Benefits Transfer debit card to purchase food products. In many states, the monetary benefits are dispersed to people across 10 days of the month and on each of these days, one-tenth of the people will receive the benefit on their card. More information about the SNAP program can be found here: <https://www.fns.usda.gov/snap/supplemental-nutrition-assistance-program>".
+
+These values are encoded in `snap_CA`, `snap_TX` and `snap_WI`. CA, TX, WI represent the states of California, Texas, and Wisconsin, respectively, from which the day/product/store data is made available.
+
+## Sell Prices
+
+The other explanatory variable available concerns sell prices:
+
+```{r}
+#| warning: false
+#| message: false
+
+prices<-read_csv("sell_prices.csv")
+head(prices)
+
+```
+
+The *ReadMe* file describes the 'sell_prices.csv' as:
+
+-   "Contains information about the sell prices of the products for each store and week".
+
+`sell_price` represents the average price, taken across seven days of `wm_yr_wk`, at `store_id` for product `item_id`.
+
+As with the 'calendar.csv' file, the 'sell_prices.csv' contains information for the entire sample, including the validation and test sets.
+
+## Sales databases
+
+Due to the timeline of the competition, there are a total of four files containing the time series of sales at the day/product/store levels. One possible way of building the complete time series for a given unit is by loading 'sales_train_evaluation.csv' and 'sales_test_evaluation.csv':
+
+```{r}
+#| warning: false
+#| message: false
+
+sales1<-read_csv("sales_train_evaluation.csv")
+head(sales1)
+
+sales2<-read_csv("sales_test_evaluation.csv")
+head(sales2)
+
+```
+
+The columns `item_id` and `store_id` are the identifiers of a given time series at the most granular level. All columns with the pattern "d\_\[number\]" identify a day of sales. The total number of days of the entire sample corresponds to the number of rows of the 'calendar.csv' file.
+
+## Weights
+
+As the competition involves comparing different time series at multiple levels of aggregation, a way of combining the multiple forecasts is needed. The M5 Competition chose to compute a weighted variation of the Root Mean Squared Error (RMSE), with the weights calculated from the accumulated dollar sales across the 28 days preceding the forecasting period. As this is a simple calculation, the organizers provided the weights in two files: 'weights_validation.csv' and 'weights_evaluation.csv'.
+
+The existence of two different files relates to the release of the validation sample during the competition, as mentioned. We are going to use only the last set of weights in our exercise:
+
+```{r}
+#| warning: false
+#| message: false
+
+w<-read_csv("weights_evaluation.csv")
+head(w)
+
+```
+
+We chose to analyze Aggregation Level 4: Category. This leaves us with a total of 3 time series to analyze, namely `FOODS`, `HOBBIES` and `HOUSEHOLD`.
+
+## Sales
+
+```{r}
+#| warning: false
+#| message: false
+
+# Joining into a single data frame
+sales<-sales1 %>%
+  left_join(sales2, by = c(
+    "item_id", "dept_id", "cat_id", "store_id", "state_id"
+  ))
+
+head(sales)
+
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+
+rm(sales1, sales2)
+
+```
+
+Now we need to pivot the dataset to add all units of a given category:
+
+```{r}
+#| warning: false
+#| message: false
+
+# Pivot
+sales %<>% pivot_longer(cols = all_of(
+  colnames(sales)[str_detect(colnames(sales), "d_")]
+), names_to = "day_label", values_to = "units")
+
+# Aggregation to category/day
+sales %<>% group_by(cat_id, day_label) %>%
+  summarise(units = sum(units)) %>%
+  ungroup()
+
+head(sales)
+
+```
+
+We can add a date variable to the data frame above and sort the dates by category:
+
+```{r}
+#| warning: false
+#| message: false
+
+date_dict<-tibble("date" = seq.Date(from = as.Date("2011-01-29"),
+                                    to = as.Date("2016-06-19"), by = 1))
+date_dict$day_label<-paste0("d_", 1:nrow(date_dict))
+
+# Joining and sorting
+sales %<>% left_join(date_dict, by = "day_label") %>%
+  select(-day_label) %>%
+  group_by(cat_id) %>% arrange(date, .by_group = T) %>%
+  ungroup()
+# Reordering the columns
+sales %<>% select(cat_id, date, units)
+
+head(sales)
+
+# Saving this object to use in the next script
+write_csv(sales, "sales.csv")
+
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+
+rm(date_dict)
+
+```
+
+## Quick check and searching for missing data
+
+There are some functions that help us quickly understand the structure of our data and, at the same time, detect missing values.
+
+```{r}
+#| warning: false
+#| message: false
+
+str(sales)
+
+```
+
+`str` exhibits the first values of our dataset along with the type of each variable. As our object is stored as a tibble, we had access to these information when calling the `head` function, but this won't always be the case.
+
+In case a missing value is present, the `summary` function adds a specific line counting how many are present for each variable:
+
+```{r}
+#| warning: false
+#| message: false
+
+summary(sales)
+
+```
+
+There are no missing values in our data frame as we don't have a line that counts `NA`s (R's missing value). Lets check for the other datasets:
+
+```{r}
+#| warning: false
+#| message: false
+
+summary(calendar)
+
+summary(prices)
+
+```
+
+`summary` doesn't check character columns. As we have seen, `event_type` and `event_name` columns contain `NA`s - we have to keep that in mind. Other than that, we have no more missing data.
+
+Some additional information about the distributions are also shown by `summary`, but a better way to understand the characteristics of our dataset is by using plots.
+
+## Some time series plots
+
+We begin our exploratory data analysis with some time series plots of total category sales. We can plot all 3 series in a single graph with the following commands:
+
+We can use `plotly::ggplotly` to make the plot above interactive:
+
+```{r}
+#| warning: false
+#| message: false
+
+plotly::ggplotly(
+  sales %>%
+    ggplot(aes(x = date, y = units, col = cat_id)) +
+    geom_line() +
+    theme_minimal()
+)
+
+```
+
+Some key points call our attention: (1) the series have different scales; (2) multiple seasonal patterns are present (month and week); (3) all time series exhibit a continuous increase in total unit sales throughout the years; and (4) special events are relevant for the series - Christmas being the most notable example as all series have total sales close to zero in this date.
+
+## Visualizing univariate distributions
+
+There are two straightforward ways of analyzing the distribution of continuous variables: (1) histograms; and (2) boxplots. Categorical variables are usually displayed with bar charts.
+
+```{r}
+#| warning: false
+#| message: false
+
+list_plots3<-list()
+for(i in unique(sales$cat_id)){
+  list_plots3[[i]]<-sales %>%
+    filter(cat_id == i) %>%
+    ggplot(aes(x = units)) +
+    geom_histogram() +
+    theme_minimal() +
+    labs(title = i)
+}
+
+grid.arrange(grobs = list_plots3, nrow = 1)
+
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+
+rm(list_plots3)
+
+```
+
+`HOBBIES` and `HOUSEHOLD` seem to have (right-)skewed sales distributions. Few extremely low values are observed. These are likely related to special days as we saw in the interactive time series plot. With the exception of these values, there are no clear outliers from the histograms above.
+
+Lets check the dates with zero sales:
+
+```{r}
+#| warning: false
+#| message: false
+
+sales %>% filter(units == 0) %>%
+  pull(date) %>% unique() %>% sort()
+
+```
+
+In all cases it corresponds to a Christmas day.
+
+We now turn our attention to `prices`. Differently from the variables in `calendar`, our analysis now involves understanding how we should aggregate the week/product/store prices into a single(few) variable(s).
+
+```{r}
+#| warning: false
+#| message: false
+
+head(prices)
+
+```
+
+Note `cat_id` is part of the `item_id`. Lets add this variable to the object above:
+
+```{r}
+#| warning: false
+#| message: false
+
+prices$cat_id<-unlist(str_split(prices$item_id, "_", 2, simplify = T), recursive = F)[,1]
+
+```
+
+It is extremely rare to have 2 or more different prices across stores for a given product/week. In this situation it is likely that only the (weighted) mean provides enough information for our model.
+
+It seems that it's ok to summarize the information of all prices for a given product/week across all stores with its (weighted) mean. What about the variation of prices for a given category? How can we summarize this information?
+
+Lets begin adding the weights to our `price` data frame and summarizing the price for each product/week:
+
+```{r}
+#| warning: false
+#| message: false
+
+# Weights
+w<-read_csv("weights_evaluation.csv") %>%
+  filter(Level_id == "Level1") %>%
+  # Keeping dollar sales to calculated weights for upper levels of the hierarchy if needed
+  select(item_id = Agg_Level_1, store_id = Agg_Level_2, dollar_sales = Dollar_Sales)
+
+# view(prices)
+# view(w)
+# Joining
+prices %<>% left_join(w, by = c("item_id"))
+
+# Summarizing
+prices %<>% group_by(cat_id, item_id, wm_yr_wk) %>%
+  summarise(sell_price = weighted.mean(sell_price, dollar_sales),
+            dollar_sales = sum(dollar_sales)) %>%
+  ungroup()
+# In case a group has zero in dollar_sales, sell_price is NA from the code above - lets replace with zero
+prices$sell_price[prices$dollar_sales == 0]<-0
+
+head(prices)
+
+```
+
+Prices in a same category are not homogeneous. It might be interesting to add not only the weekly weighted mean of category prices, but also more information about the distribution of prices, perhaps some quantiles might improve the forecasting accuracy of our models.
+
+For both variables (`any_SNAP` and `any_event`) and across all categories it seems that events indeed change the distribution of sales.
+
+## Calendar
+
+```{r}
+#| warning: false
+#| message: false
+
+head(calendar)
+
+```
+
+The columns `date` and `wm_yr_wk` will be used when joining this data frame with `sales` and `prices`, respectively, and must be left unchanged.
+
+Although `weekday`, `wday`, `month` and `year` can be readily obtained from `date`, we'll keep some of these to use them in the next script. We opt to keep only `wday` and `month` in the data frame to represent the seasonal periods of interest:
+
+```{r}
+#| warning: false
+#| message: false
+
+calendar %<>% select(-weekday, -year) %>%
+  mutate(wday = as.factor(wday), month = as.factor(month))
+
+```
+
+`wday` and `month` were converted to factors. If left unchanged, these would be understood by a generic model fitting function as a number. An ordinary least squares (OLS) model, for instance, would fit a single coefficient to all seasonals of the same type, when the desired approach would be to have different dummies representing changes in the conditional mean according to the period. Fitting a single coefficient is equivalent to say that there is a constant conditional mean increase/decrease over time, which is not necessarily true.
+
+SNAP events are already encoded as dummies and will be left unchanged. We will create dummies for the events from `calendar`:
+
+```{r}
+#| warning: false
+#| message: false
+
+calendar_aux<-calendar %>% select(date, event_name_1, event_name_2)
+head(calendar_aux)
+
+# Removing these untreated variables from calendar
+calendar %<>% select(-starts_with("event"))
+# Now we need to put the columns ending in "_2" below the columns ending in "_1"
+calendar_aux<-rbind.data.frame(
+  calendar_aux %>% select(date, event = event_name_1),
+  calendar_aux %>% select(date, event = event_name_2)
+  )
+# Dropping NAs to create the dummies only when needed
+calendar_aux %<>% drop_na()
+# Creating the dummies
+calendar_aux<-fastDummies::dummy_cols(calendar_aux)
+# Deleting the original column
+calendar_aux %<>% select(-event)
+# Treating for the case of two dummies on the same date
+calendar_aux %<>% group_by(date) %>%
+  summarise_all(sum) %>%
+  ungroup()
+# Days with no events
+calendar_aux2<-tibble("date" = as.Date(setdiff(calendar$date, calendar_aux$date), origin = "1970-01-01"))
+calendar_aux2<-cbind.data.frame(calendar_aux2,
+                                matrix(data = 0, 
+                                       nrow = nrow(calendar_aux2),
+                                       ncol = (ncol(calendar_aux)-1)))
+colnames(calendar_aux2)<-colnames(calendar_aux)
+# Adding these days to calenda_aux
+calendar_aux<-rbind.data.frame(calendar_aux, calendar_aux2)
+# And now we can join with calendar
+calendar %<>% left_join(calendar_aux)
+
+head(calendar)
+
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+
+rm(calendar_aux, calendar_aux2)
+
+```
+
+In the treatment above, we opt to use only the columns `event_name` and ignore the groups/types of the events.
+
+## Prices
+
+```{r}
+#| warning: false
+#| message: false
+
+head(prices)
+
+```
+
+Below we create the weighted mean, median and the 25%, 75% and 90% quantiles of weekly prices for each `cat_id`. The usage of more upper quantiles than lower ones is due to the observed right-skewed distributions in two out of three categories.
+
+```{r}
+#| warning: false
+#| message: false
+
+# Summarizing
+prices %<>% group_by(cat_id, wm_yr_wk) %>%
+  summarise(price_wmean = weighted.mean(sell_price, dollar_sales),
+            price_median = median(sell_price),
+            price_q25 = quantile(sell_price, 0.25),
+            price_q75 = quantile(sell_price, 0.75),
+            price_q90 = quantile(sell_price, 0.9)) %>%
+  ungroup()
+
+head(prices)
+
+```
+
+## Joining
+
+We are now able to join all of the pieces presented above and save the database that will be used in the forecasting exercise.
+
+```{r}
+#| warning: false
+#| message: false
+
+data<-sales %>% left_join(calendar, by = "date") %>%
+  left_join(prices, by = c("cat_id", "wm_yr_wk"))
+
+head(data)
+
+```
+
+Dropping the `wm_yr_wk` and checking if everything is ok:
+
+```{r}
+#| warning: false
+#| message: false
+
+data %<>% select(-wm_yr_wk)
+data %>% anyNA()
+
+```
+
+Saving the object:
+
+```{r}
+#| warning: false
+#| message: false
+
+write_csv(data, "treated_data.csv")
+
+```
